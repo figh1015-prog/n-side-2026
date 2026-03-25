@@ -9,6 +9,7 @@ import { indexingRoute } from './routes/indexing'
 import { schemaRoute } from './routes/schema'
 import { batchRoute } from './routes/batch'
 import { pagespeedRoute } from './routes/pagespeed'
+import { authRoute } from './routes/auth'
 
 type Bindings = {
   DB: D1Database
@@ -26,6 +27,7 @@ app.use('/api/*', cors({
 }))
 
 // API Routes
+app.route('/api/auth', authRoute)
 app.route('/api/generate', generateRoute)
 app.route('/api/keyword', keywordRoute)
 app.route('/api/history', historyRoute)
