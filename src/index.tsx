@@ -10,6 +10,8 @@ import { schemaRoute } from './routes/schema'
 import { batchRoute } from './routes/batch'
 import { pagespeedRoute } from './routes/pagespeed'
 import { authRoute } from './routes/auth'
+import { dashboardRoute } from './routes/dashboard'
+import { monitorRoute } from './routes/monitor'
 
 type Bindings = {
   DB: D1Database
@@ -36,6 +38,8 @@ app.route('/api/indexing', indexingRoute)
 app.route('/api/schema', schemaRoute)
 app.route('/api/batch', batchRoute)
 app.route('/api/pagespeed', pagespeedRoute)
+app.route('/api/dashboard', dashboardRoute)
+app.route('/api/monitor', monitorRoute)
 
 // Health check
 app.get('/api/health', (c) => {

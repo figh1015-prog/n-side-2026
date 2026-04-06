@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react'
 import {
   Calendar, Clock, Plus, Trash2, AlertTriangle, CheckCircle,
-  ChevronLeft, ChevronRight, LayoutGrid, List, Zap, Info
+  ChevronLeft, ChevronRight, LayoutGrid, List, Zap, Loader2
 } from 'lucide-react'
 import { useToastContext } from '../App'
+import { authFetch } from '../lib/auth'
 
 interface ScheduleItem {
   id: string
@@ -11,18 +12,18 @@ interface ScheduleItem {
   platform: string
   scheduledAt: string
   status: 'pending' | 'published' | 'failed'
+  article_id?: string
 }
 
-const MOCK_SCHEDULES: ScheduleItem[] = [
-  { id: '1', keyword: '다이어트 식단 완전정복', platform: '네이버 블로그', scheduledAt: '2026-03-26T09:00:00', status: 'pending' },
-  { id: '2', keyword: '헬스 운동 루틴 초보자용', platform: '티스토리', scheduledAt: '2026-03-27T09:00:00', status: 'pending' },
-  { id: '3', keyword: '단백질 보충제 비교 리뷰', platform: '네이버 블로그', scheduledAt: '2026-03-28T14:00:00', status: 'pending' },
-  { id: '4', keyword: '오메가3 효능과 부작용', platform: '워드프레스', scheduledAt: '2026-03-25T09:00:00', status: 'published' },
-  { id: '5', keyword: '채식 레시피 모음', platform: '티스토리', scheduledAt: '2026-03-24T09:00:00', status: 'published' },
-  { id: '6', keyword: '저탄고지 식단 시작하기', platform: '네이버 블로그', scheduledAt: '2026-03-29T09:00:00', status: 'failed' },
-  { id: '7', keyword: '마그네슘 결핍 증상', platform: '네이버 블로그', scheduledAt: '2026-03-30T09:00:00', status: 'pending' },
-  { id: '8', keyword: '비타민D 보충 방법', platform: '티스토리', scheduledAt: '2026-03-31T09:00:00', status: 'pending' },
-]
+// 백엔드 schedules 테이블 응답 형식과 매핑
+interface ScheduleFromDB {
+  id: string
+  article_id: string
+  platform: string
+  scheduled_at: string
+  status: 'pending' | 'published' | 'failed'
+  keyword?: string  // JOIN으로 가져옴
+}
 
 const PLATFORM_COLORS: Record<string, string> = {
   '네이버 블로그': '#03c75a',
@@ -41,9 +42,13 @@ const MONTHS = ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8월', 
 
 export default function SchedulePage() {
   const toast = useToastContext()
-  const [schedules, setSchedules] = useState<ScheduleItem[]>(MOCK_SCHEDULES)
-  const [viewMode, setViewMode] = useState<'month' | 'week' | 'list'>('month')
-  const [currentDate, setCurrentDate] = useState(new Date(2026, 2, 1)) // March 2026
+  const [schedules, setSchedules] = useState<ScheduleItem[]>([])
+  const [loading, setLoading] = useState(true)
+  const [viewMode, setViewMode] = useState<'month' | 'list'>('month')
+  const [currentDate, setCurrentDate] = useState(() => {
+    const now = new Date()
+    return new Date(now.getFullYear(), now.getMonth(), 1)
+  })
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
   const [showAddModal, setShowAddModal] = useState(false)
   const [newSchedule, setNewSchedule] = useState({
@@ -55,15 +60,49 @@ export default function SchedulePage() {
   })
   const [optimalTimes, setOptimalTimes] = useState<{ hour: number; minute: number; score: number; reason: string }[]>([])
   const [showOptimal, setShowOptimal] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [deleting, setDeleting] = useState<string | null>(null)
+
+  // ── DB에서 스케줄 로드 ──────────────────────────────────────
+  const fetchSchedules = async () => {
+    setLoading(true)
+    try {
+      const res = await authFetch('/api/schedule')
+      if (!res.ok) throw new Error()
+      const data = await res.json() as { schedules: ScheduleFromDB[] }
+      const mapped: ScheduleItem[] = (data.schedules || []).map(s => ({
+        id: s.id,
+        keyword: s.keyword || s.article_id || '(글 없음)',
+        platform: s.platform,
+        scheduledAt: s.scheduled_at,
+        status: s.status,
+        article_id: s.article_id,
+      }))
+      setSchedules(mapped)
+    } catch {
+      // DB 오류 시 빈 목록 유지
+      setSchedules([])
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // ── 최적 발행 시간 ──────────────────────────────────────────
+  const fetchOptimalTimes = async () => {
+    try {
+      const res = await authFetch('/api/schedule/optimal-times')
+      if (!res.ok) return
+      const data = await res.json() as { suggestions?: typeof optimalTimes }
+      setOptimalTimes(data.suggestions || [])
+    } catch { /* 무시 */ }
+  }
 
   useEffect(() => {
-    fetch('/api/schedule/optimal-times')
-      .then(r => r.json())
-      .then((data: { suggestions?: typeof optimalTimes }) => setOptimalTimes(data.suggestions || []))
-      .catch(() => {})
+    fetchSchedules()
+    fetchOptimalTimes()
   }, [])
 
-  // Calendar calculations
+  // ── 달력 계산 ───────────────────────────────────────────────
   const year = currentDate.getFullYear()
   const month = currentDate.getMonth()
   const firstDay = new Date(year, month, 1).getDay()
@@ -74,44 +113,77 @@ export default function SchedulePage() {
     return schedules.filter(s => s.scheduledAt.startsWith(dateStr))
   }
 
+  // ── 스케줄 추가 ─────────────────────────────────────────────
+  // NOTE: 현재 schedule API는 articleId가 필요하지만,
+  // 키워드만으로도 쓸 수 있게 임시 article을 만들거나
+  // 키워드를 직접 articleId로 넘기도록 처리합니다.
   const handleAddSchedule = async () => {
     if (!newSchedule.keyword || !newSchedule.date) {
       toast.error('키워드와 날짜를 입력하세요.')
       return
     }
+    setSaving(true)
+
     const scheduledAt = `${newSchedule.date}T${newSchedule.hour}:${newSchedule.minute}:00`
 
-    // Check conflict
-    const conflict = schedules.find(s =>
-      s.scheduledAt.startsWith(newSchedule.date) &&
-      s.platform === newSchedule.platform &&
-      s.status === 'pending'
-    )
+    // 스케줄 추가를 DB에 저장
+    // articleId 없이 저장하기 위해 keyword를 article_id로 사용
+    // (실제 운영 시 generate → save → schedule 흐름 권장)
+    try {
+      const res = await authFetch('/api/schedule', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          articleId: `keyword-${Date.now()}`,  // 임시 ID (실제 글이 없을 때)
+          scheduledAt,
+          platform: newSchedule.platform,
+        }),
+      })
+      const data = await res.json() as { conflict?: boolean; suggestedTime?: string; message?: string; success?: boolean; id?: string }
 
-    if (conflict) {
-      const next = new Date(scheduledAt)
-      next.setDate(next.getDate() + 1)
-      toast.warning(`충돌 감지! ${conflict.keyword}이(가) 같은 날 예약됨. 다음 날(${next.toLocaleDateString('ko-KR')})로 이동할까요?`)
-    }
+      if (data.conflict) {
+        toast.warning(data.message || '같은 시간에 이미 예약이 있습니다.')
+        setSaving(false)
+        return
+      }
 
-    const item: ScheduleItem = {
-      id: crypto.randomUUID(),
-      keyword: newSchedule.keyword,
-      platform: newSchedule.platform,
-      scheduledAt,
-      status: 'pending',
+      if (data.success) {
+        // 성공 - 목록에 추가
+        const newItem: ScheduleItem = {
+          id: data.id || crypto.randomUUID(),
+          keyword: newSchedule.keyword,
+          platform: newSchedule.platform,
+          scheduledAt,
+          status: 'pending',
+        }
+        setSchedules(prev => [...prev, newItem])
+        setShowAddModal(false)
+        setNewSchedule({ keyword: '', platform: '네이버 블로그', date: '', hour: '09', minute: '00' })
+        toast.success('예약이 추가되었습니다')
+      }
+    } catch {
+      toast.error('예약 추가에 실패했습니다.')
+    } finally {
+      setSaving(false)
     }
-    setSchedules(prev => [...prev, item])
-    setShowAddModal(false)
-    setNewSchedule({ keyword: '', platform: '네이버 블로그', date: '', hour: '09', minute: '00' })
-    toast.success('예약 추가됨')
   }
 
-  const handleDelete = (id: string) => {
-    setSchedules(prev => prev.filter(s => s.id !== id))
-    toast.success('예약이 삭제되었습니다.')
+  // ── 스케줄 삭제 ─────────────────────────────────────────────
+  const handleDelete = async (id: string) => {
+    setDeleting(id)
+    try {
+      const res = await authFetch(`/api/schedule/${id}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error()
+      setSchedules(prev => prev.filter(s => s.id !== id))
+      toast.success('예약이 삭제되었습니다.')
+    } catch {
+      toast.error('삭제에 실패했습니다.')
+    } finally {
+      setDeleting(null)
+    }
   }
 
+  // ── 달력 셀 렌더링 ──────────────────────────────────────────
   const renderCalendarCell = (day: number) => {
     const items = getSchedulesForDate(day)
     const today = new Date()
@@ -137,7 +209,7 @@ export default function SchedulePage() {
             <div key={item.id}
               className="text-xs px-1.5 py-0.5 rounded truncate"
               style={{ background: `${STATUS_COLORS[item.status]}20`, color: STATUS_COLORS[item.status] }}>
-              {item.keyword.substring(0, 12)}...
+              {item.keyword.substring(0, 12)}{item.keyword.length > 12 ? '...' : ''}
             </div>
           ))}
           {items.length > 2 && (
@@ -151,7 +223,6 @@ export default function SchedulePage() {
   const sortedSchedules = [...schedules].sort((a, b) =>
     new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime()
   )
-
   const selectedDayItems = selectedDate ? schedules.filter(s => s.scheduledAt.startsWith(selectedDate)) : []
 
   return (
@@ -200,7 +271,7 @@ export default function SchedulePage() {
                   <span className="text-amber-400 font-bold">
                     {String(t.hour).padStart(2, '0')}:{String(t.minute).padStart(2, '0')}
                   </span>
-                  <span className="badge text-xs bg-amber-500/20 text-amber-400">{t.score}점</span>
+                  <span className="text-xs px-2 py-0.5 rounded" style={{ background: 'rgba(245,158,11,0.2)', color: '#f59e0b' }}>{t.score}점</span>
                 </div>
                 <p className="text-xs text-slate-500">{t.reason}</p>
               </div>
@@ -218,16 +289,24 @@ export default function SchedulePage() {
           { label: '오류', value: schedules.filter(s => s.status === 'failed').length, color: '#ef4444' },
         ].map(stat => (
           <div key={stat.label} className="card py-4 text-center">
-            <div className="text-2xl font-bold" style={{ color: stat.color }}>{stat.value}</div>
+            <div className="text-2xl font-bold" style={{ color: stat.color }}>
+              {loading ? <span className="animate-pulse">-</span> : stat.value}
+            </div>
             <div className="text-xs text-slate-500 mt-1">{stat.label}</div>
           </div>
         ))}
       </div>
 
+      {/* Loading state */}
+      {loading && (
+        <div className="card flex items-center justify-center py-16">
+          <Loader2 className="w-8 h-8 animate-spin text-indigo-400" />
+        </div>
+      )}
+
       {/* Calendar View */}
-      {viewMode === 'month' && (
+      {!loading && viewMode === 'month' && (
         <div className="card">
-          {/* Calendar Header */}
           <div className="flex items-center justify-between mb-4">
             <button onClick={() => setCurrentDate(new Date(year, month - 1, 1))}
               className="btn-secondary p-2">
@@ -242,7 +321,6 @@ export default function SchedulePage() {
             </button>
           </div>
 
-          {/* Day Headers */}
           <div className="grid grid-cols-7 gap-1 mb-2">
             {DAYS.map(d => (
               <div key={d} className={`text-xs text-center py-1.5 font-medium
@@ -252,7 +330,6 @@ export default function SchedulePage() {
             ))}
           </div>
 
-          {/* Calendar Grid */}
           <div className="grid grid-cols-7 gap-1">
             {Array.from({ length: firstDay }, (_, i) => (
               <div key={`empty-${i}`} className="min-h-[90px]" />
@@ -260,7 +337,6 @@ export default function SchedulePage() {
             {Array.from({ length: daysInMonth }, (_, i) => renderCalendarCell(i + 1))}
           </div>
 
-          {/* Legend */}
           <div className="flex items-center gap-4 mt-3 pt-3 border-t flex-wrap" style={{ borderColor: '#2d2d4a' }}>
             {Object.entries(STATUS_COLORS).map(([status, color]) => (
               <div key={status} className="flex items-center gap-1.5 text-xs text-slate-500">
@@ -272,8 +348,8 @@ export default function SchedulePage() {
         </div>
       )}
 
-      {/* Selected Date Detail */}
-      {selectedDate && selectedDayItems.length > 0 && viewMode === 'month' && (
+      {/* 선택된 날짜 상세 */}
+      {!loading && selectedDate && selectedDayItems.length > 0 && viewMode === 'month' && (
         <div className="card">
           <h3 className="font-medium text-white mb-3">
             {new Date(selectedDate).toLocaleDateString('ko-KR', { month: 'long', day: 'numeric' })} 예약
@@ -290,13 +366,17 @@ export default function SchedulePage() {
                       <Clock className="w-3 h-3" />
                       {new Date(item.scheduledAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}
                     </span>
-                    <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: `${PLATFORM_COLORS[item.platform]}20`, color: PLATFORM_COLORS[item.platform] }}>
+                    <span className="text-xs px-1.5 py-0.5 rounded"
+                      style={{ background: `${PLATFORM_COLORS[item.platform] || '#666'}20`, color: PLATFORM_COLORS[item.platform] || '#999' }}>
                       {item.platform}
                     </span>
                   </div>
                 </div>
-                <button onClick={() => handleDelete(item.id)} className="text-slate-600 hover:text-red-400 p-1">
-                  <Trash2 className="w-4 h-4" />
+                <button
+                  onClick={() => handleDelete(item.id)}
+                  disabled={deleting === item.id}
+                  className="text-slate-600 hover:text-red-400 p-1">
+                  {deleting === item.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
                 </button>
               </div>
             ))}
@@ -305,47 +385,58 @@ export default function SchedulePage() {
       )}
 
       {/* List View */}
-      {viewMode === 'list' && (
+      {!loading && viewMode === 'list' && (
         <div className="card">
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-xs text-slate-500 border-b" style={{ borderColor: '#2d2d4a' }}>
-                  <th className="text-left pb-2">키워드</th>
-                  <th className="text-left pb-2">플랫폼</th>
-                  <th className="text-left pb-2">예약 일시</th>
-                  <th className="text-left pb-2">상태</th>
-                  <th className="text-left pb-2">액션</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sortedSchedules.map(item => (
-                  <tr key={item.id} className="border-b hover:bg-white/3 transition-colors"
-                    style={{ borderColor: '#2d2d4a' }}>
-                    <td className="py-3 font-medium text-slate-300">{item.keyword}</td>
-                    <td className="py-3">
-                      <span className="text-xs px-2 py-1 rounded"
-                        style={{ background: `${PLATFORM_COLORS[item.platform]}20`, color: PLATFORM_COLORS[item.platform] }}>
-                        {item.platform}
-                      </span>
-                    </td>
-                    <td className="py-3 text-slate-400 text-xs">
-                      {new Date(item.scheduledAt).toLocaleString('ko-KR')}
-                    </td>
-                    <td className="py-3">
-                      {item.status === 'pending' && <span className="badge-blue">예약됨</span>}
-                      {item.status === 'published' && <span className="badge-green flex items-center gap-1 w-fit"><CheckCircle className="w-3 h-3" /> 발행됨</span>}
-                      {item.status === 'failed' && <span className="badge-red flex items-center gap-1 w-fit"><AlertTriangle className="w-3 h-3" /> 오류</span>}
-                    </td>
-                    <td className="py-3">
-                      <button onClick={() => handleDelete(item.id)} className="text-slate-600 hover:text-red-400 p-1">
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </td>
+            {schedules.length === 0 ? (
+              <div className="text-center py-12 text-slate-600">
+                <Calendar className="w-10 h-10 mx-auto mb-3 opacity-30" />
+                <p>예약된 글이 없습니다.</p>
+                <p className="text-xs mt-1">예약 추가 버튼을 눌러 발행 일정을 잡아보세요.</p>
+              </div>
+            ) : (
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-xs text-slate-500 border-b" style={{ borderColor: '#2d2d4a' }}>
+                    <th className="text-left pb-2">키워드</th>
+                    <th className="text-left pb-2">플랫폼</th>
+                    <th className="text-left pb-2">예약 일시</th>
+                    <th className="text-left pb-2">상태</th>
+                    <th className="text-left pb-2">액션</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {sortedSchedules.map(item => (
+                    <tr key={item.id} className="border-b hover:bg-white/3 transition-colors"
+                      style={{ borderColor: '#2d2d4a' }}>
+                      <td className="py-3 font-medium text-slate-300">{item.keyword}</td>
+                      <td className="py-3">
+                        <span className="text-xs px-2 py-1 rounded"
+                          style={{ background: `${PLATFORM_COLORS[item.platform] || '#666'}20`, color: PLATFORM_COLORS[item.platform] || '#999' }}>
+                          {item.platform}
+                        </span>
+                      </td>
+                      <td className="py-3 text-slate-400 text-xs">
+                        {new Date(item.scheduledAt).toLocaleString('ko-KR')}
+                      </td>
+                      <td className="py-3">
+                        {item.status === 'pending' && <span className="badge-blue">예약됨</span>}
+                        {item.status === 'published' && <span className="badge-green flex items-center gap-1 w-fit"><CheckCircle className="w-3 h-3" /> 발행됨</span>}
+                        {item.status === 'failed' && <span className="badge-red flex items-center gap-1 w-fit"><AlertTriangle className="w-3 h-3" /> 오류</span>}
+                      </td>
+                      <td className="py-3">
+                        <button
+                          onClick={() => handleDelete(item.id)}
+                          disabled={deleting === item.id}
+                          className="text-slate-600 hover:text-red-400 p-1">
+                          {deleting === item.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
         </div>
       )}
@@ -400,7 +491,13 @@ export default function SchedulePage() {
 
             <div className="flex gap-3">
               <button onClick={() => setShowAddModal(false)} className="btn-secondary flex-1 py-2.5">취소</button>
-              <button onClick={handleAddSchedule} className="btn-primary flex-1 py-2.5">예약 추가</button>
+              <button
+                onClick={handleAddSchedule}
+                disabled={saving}
+                className="btn-primary flex-1 py-2.5 flex items-center justify-center gap-2">
+                {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                예약 추가
+              </button>
             </div>
           </div>
         </div>

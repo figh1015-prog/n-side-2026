@@ -2,40 +2,12 @@ import React, { useState, useEffect, useCallback } from 'react'
 import {
   History, Search, Filter, Download, Trash2, Eye, Copy,
   Send, Edit3, ChevronDown, ChevronUp, ChevronLeft, ChevronRight,
-  FileText, Calendar, BarChart2
+  FileText, Calendar, BarChart2, Loader2
 } from 'lucide-react'
 import { useToastContext } from '../App'
 import { getAEOScoreBadgeClass } from '../lib/aeo'
+import { authFetch } from '../lib/auth'
 import type { Article } from '../types'
-
-// Mock data
-const generateMockArticles = (): Article[] => {
-  const keywords = [
-    '다이어트 식단 완전 가이드', '헬스 운동 루틴', '단백질 보충제 비교',
-    '오메가3 효능과 복용법', '저탄고지 식단 시작하기', '마그네슘 결핍 증상',
-    '비타민D 보충 방법', '간헐적 단식 완전 가이드', '근육 증가 식단',
-    '체지방 감소 운동', 'HIIT 운동 효과', '채식 단백질 공급원',
-    '수면 개선 방법', '스트레스 해소법', '면역력 높이는 방법',
-    '혈당 조절 식품', '콜레스테롤 낮추는 음식', '항산화 식품 종류',
-    '장 건강 개선법', '두피 건강 관리',
-  ]
-  const platforms = ['네이버 블로그', '티스토리', '워드프레스']
-  const statuses: Article['status'][] = ['draft', 'published', 'scheduled', 'error']
-
-  return keywords.map((kw, i) => ({
-    id: crypto.randomUUID(),
-    keyword: kw,
-    platform: platforms[i % 3],
-    word_count: Math.floor(Math.random() * 3000) + 800,
-    aeo_score: Math.floor(Math.random() * 60) + 40,
-    readability_score: Math.random() * 30 + 60,
-    status: statuses[i % 4],
-    created_at: new Date(Date.now() - i * 86400000 * 1.5).toISOString(),
-    published_at: i % 4 === 1 ? new Date(Date.now() - i * 86400000).toISOString() : undefined,
-  }))
-}
-
-const MOCK_ARTICLES = generateMockArticles()
 
 const STATUS_LABELS: Record<string, string> = {
   draft: '초안',
@@ -53,9 +25,11 @@ const STATUS_BADGE_CLASSES: Record<string, string> = {
 
 export default function HistoryPage() {
   const toast = useToastContext()
-  const [articles, setArticles] = useState<Article[]>(MOCK_ARTICLES)
-  const [filtered, setFiltered] = useState<Article[]>(MOCK_ARTICLES)
+  const [articles, setArticles] = useState<Article[]>([])
+  const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
+  const [totalPages, setTotalPages] = useState(1)
+  const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [filterPlatform, setFilterPlatform] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
@@ -64,24 +38,96 @@ export default function HistoryPage() {
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [showFilters, setShowFilters] = useState(false)
+  const [deleting, setDeleting] = useState<string | null>(null)
 
-  const PER_PAGE = 20
+  // ── 실제 API에서 데이터 로드 ───────────────────────────────────
+  const fetchArticles = useCallback(async (pg = 1) => {
+    setLoading(true)
+    try {
+      const params = new URLSearchParams({
+        page: String(pg),
+        ...(search && { search }),
+        ...(filterPlatform && { platform: filterPlatform }),
+        ...(filterStatus && { status: filterStatus }),
+      })
 
-  const applyFilters = useCallback(() => {
-    let result = [...articles]
-    if (search) result = result.filter(a => a.keyword.includes(search))
-    if (filterPlatform) result = result.filter(a => a.platform === filterPlatform)
-    if (filterStatus) result = result.filter(a => a.status === filterStatus)
-    if (filterAeoMin) result = result.filter(a => a.aeo_score >= Number(filterAeoMin))
-    if (filterAeoMax) result = result.filter(a => a.aeo_score <= Number(filterAeoMax))
-    setFiltered(result)
-    setPage(1)
-  }, [articles, search, filterPlatform, filterStatus, filterAeoMin, filterAeoMax])
+      const res = await authFetch(`/api/history?${params}`)
+      if (!res.ok) throw new Error('API 오류')
+      const data = await res.json() as {
+        articles: Article[]
+        total: number
+        page: number
+        pages: number
+      }
 
-  useEffect(() => { applyFilters() }, [applyFilters])
+      let filtered = data.articles || []
 
-  const totalPages = Math.ceil(filtered.length / PER_PAGE)
-  const paginated = filtered.slice((page - 1) * PER_PAGE, page * PER_PAGE)
+      // AEO 필터 (서버에서 지원 안 하므로 클라이언트에서)
+      if (filterAeoMin) filtered = filtered.filter(a => a.aeo_score >= Number(filterAeoMin))
+      if (filterAeoMax) filtered = filtered.filter(a => a.aeo_score <= Number(filterAeoMax))
+
+      setArticles(filtered)
+      setTotal(data.total || 0)
+      setTotalPages(data.pages || 1)
+      setPage(data.page || 1)
+    } catch {
+      toast.error('글 목록을 불러오지 못했습니다.')
+      setArticles([])
+    } finally {
+      setLoading(false)
+    }
+  }, [search, filterPlatform, filterStatus, filterAeoMin, filterAeoMax])
+
+  useEffect(() => {
+    fetchArticles(1)
+  }, [fetchArticles])
+
+  // ── 개별 삭제 ─────────────────────────────────────────────────
+  const deleteArticle = async (id: string) => {
+    setDeleting(id)
+    try {
+      const res = await authFetch(`/api/history/${id}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error()
+      setArticles(prev => prev.filter(a => a.id !== id))
+      setSelected(prev => { const n = new Set(prev); n.delete(id); return n })
+      toast.success('삭제됨')
+    } catch {
+      toast.error('삭제에 실패했습니다.')
+    } finally {
+      setDeleting(null)
+    }
+  }
+
+  // ── 상태 변경 ─────────────────────────────────────────────────
+  const changeStatus = async (id: string, status: Article['status']) => {
+    try {
+      const res = await authFetch(`/api/history/${id}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status }),
+      })
+      if (!res.ok) throw new Error()
+      setArticles(prev => prev.map(a => a.id === id ? { ...a, status } : a))
+      toast.success(status === 'published' ? '발행됨' : '상태 변경됨')
+    } catch {
+      toast.error('상태 변경에 실패했습니다.')
+    }
+  }
+
+  // ── 선택 삭제 ─────────────────────────────────────────────────
+  const deleteSelected = async () => {
+    const ids = Array.from(selected)
+    let count = 0
+    for (const id of ids) {
+      try {
+        await authFetch(`/api/history/${id}`, { method: 'DELETE' })
+        count++
+      } catch { /* 무시 */ }
+    }
+    setArticles(prev => prev.filter(a => !selected.has(a.id)))
+    setSelected(new Set())
+    toast.success(`${count}개 삭제됨`)
+  }
 
   const toggleSelect = (id: string) => {
     setSelected(prev => {
@@ -92,23 +138,18 @@ export default function HistoryPage() {
   }
 
   const selectAll = () => {
-    if (selected.size === paginated.length) {
+    if (selected.size === articles.length) {
       setSelected(new Set())
     } else {
-      setSelected(new Set(paginated.map(a => a.id)))
+      setSelected(new Set(articles.map(a => a.id)))
     }
   }
 
-  const deleteSelected = () => {
-    setArticles(prev => prev.filter(a => !selected.has(a.id)))
-    setSelected(new Set())
-    toast.success(`${selected.size}개 삭제됨`)
-  }
-
+  // ── CSV 내보내기 ──────────────────────────────────────────────
   const exportCSV = () => {
     const rows = [
       ['날짜', '키워드', '플랫폼', '글자수', 'AEO점수', '상태'],
-      ...filtered.map(a => [
+      ...articles.map(a => [
         new Date(a.created_at).toLocaleDateString('ko-KR'),
         a.keyword,
         a.platform,
@@ -120,12 +161,27 @@ export default function HistoryPage() {
     const csv = rows.map(r => r.join(',')).join('\n')
     const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `history_${new Date().toISOString().split('T')[0]}.csv`
-    a.click()
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `history_${new Date().toISOString().split('T')[0]}.csv`
+    link.click()
     toast.success('CSV 내보내기 완료')
   }
+
+  // ── 통계 계산 ─────────────────────────────────────────────────
+  const statsArr = [
+    { label: '전체', value: total, color: '#4F46E5', icon: <FileText className="w-4 h-4" /> },
+    { label: '발행됨', value: articles.filter(a => a.status === 'published').length, color: '#10b981', icon: <Send className="w-4 h-4" /> },
+    { label: '초안', value: articles.filter(a => a.status === 'draft').length, color: '#94a3b8', icon: <Edit3 className="w-4 h-4" /> },
+    {
+      label: '평균 AEO',
+      value: articles.length > 0
+        ? Math.round(articles.reduce((s, a) => s + a.aeo_score, 0) / articles.length) + '점'
+        : '-',
+      color: '#f59e0b',
+      icon: <BarChart2 className="w-4 h-4" />
+    },
+  ]
 
   return (
     <div className="p-6 max-w-[1400px] mx-auto space-y-6">
@@ -153,12 +209,7 @@ export default function HistoryPage() {
 
       {/* Stats Summary */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        {[
-          { label: '전체', value: articles.length, color: '#4F46E5', icon: <FileText className="w-4 h-4" /> },
-          { label: '발행됨', value: articles.filter(a => a.status === 'published').length, color: '#10b981', icon: <Send className="w-4 h-4" /> },
-          { label: '초안', value: articles.filter(a => a.status === 'draft').length, color: '#94a3b8', icon: <Edit3 className="w-4 h-4" /> },
-          { label: '평균 AEO', value: Math.round(articles.reduce((s, a) => s + a.aeo_score, 0) / articles.length) + '점', color: '#f59e0b', icon: <BarChart2 className="w-4 h-4" /> },
-        ].map(stat => (
+        {statsArr.map(stat => (
           <div key={stat.label} className="card py-3 px-4">
             <div className="flex items-center gap-2 mb-1">
               <span style={{ color: stat.color }}>{stat.icon}</span>
@@ -192,7 +243,7 @@ export default function HistoryPage() {
               <span className="w-2 h-2 rounded-full bg-indigo-500 ml-1" />
             )}
           </button>
-          <span className="text-xs text-slate-500">{filtered.length}개 결과</span>
+          <span className="text-xs text-slate-500">{total}개 결과</span>
         </div>
 
         {showFilters && (
@@ -233,182 +284,186 @@ export default function HistoryPage() {
 
       {/* Table */}
       <div className="card overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-xs text-slate-500 border-b" style={{ borderColor: '#2d2d4a' }}>
-              <th className="pb-3 pr-3 text-left w-8">
-                <input type="checkbox"
-                  checked={selected.size === paginated.length && paginated.length > 0}
-                  onChange={selectAll}
-                  className="accent-indigo-500 w-4 h-4 cursor-pointer" />
-              </th>
-              <th className="pb-3 text-left">날짜</th>
-              <th className="pb-3 text-left">키워드</th>
-              <th className="pb-3 text-left hidden md:table-cell">플랫폼</th>
-              <th className="pb-3 text-left hidden sm:table-cell">글자수</th>
-              <th className="pb-3 text-left">AEO</th>
-              <th className="pb-3 text-left">상태</th>
-              <th className="pb-3 text-left">액션</th>
-            </tr>
-          </thead>
-          <tbody>
-            {paginated.map(article => (
-              <React.Fragment key={article.id}>
-                <tr
-                  className={`border-b transition-colors cursor-pointer
-                    ${expandedId === article.id ? 'bg-white/5' : 'hover:bg-white/3'}
-                    ${selected.has(article.id) ? 'bg-indigo-500/5' : ''}`}
-                  style={{ borderColor: '#2d2d4a' }}
-                >
-                  <td className="py-3 pr-3" onClick={e => { e.stopPropagation(); toggleSelect(article.id) }}>
-                    <input type="checkbox" checked={selected.has(article.id)}
-                      onChange={() => toggleSelect(article.id)}
-                      className="accent-indigo-500 w-4 h-4 cursor-pointer" />
-                  </td>
-                  <td className="py-3 text-slate-500 text-xs whitespace-nowrap">
-                    {new Date(article.created_at).toLocaleDateString('ko-KR', { month: '2-digit', day: '2-digit' })}
-                  </td>
-                  <td className="py-3" onClick={() => setExpandedId(expandedId === article.id ? null : article.id)}>
-                    <div className="font-medium text-slate-300 max-w-[200px] truncate">{article.keyword}</div>
-                  </td>
-                  <td className="py-3 hidden md:table-cell">
-                    <span className="text-xs text-slate-500">{article.platform}</span>
-                  </td>
-                  <td className="py-3 text-slate-500 text-xs hidden sm:table-cell">
-                    {article.word_count.toLocaleString()}자
-                  </td>
-                  <td className="py-3">
-                    <span className={getAEOScoreBadgeClass(article.aeo_score)}>
-                      {article.aeo_score}점
-                    </span>
-                  </td>
-                  <td className="py-3">
-                    <span className={STATUS_BADGE_CLASSES[article.status] || 'badge-gray'}>
-                      {STATUS_LABELS[article.status]}
-                    </span>
-                  </td>
-                  <td className="py-3">
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => setExpandedId(expandedId === article.id ? null : article.id)}
-                        className="text-slate-500 hover:text-slate-300 p-1 transition-colors"
-                        title="미리보기"
-                      >
-                        {expandedId === article.id
-                          ? <ChevronUp className="w-4 h-4" />
-                          : <Eye className="w-4 h-4" />
-                        }
-                      </button>
-                      <button
-                        onClick={() => { navigator.clipboard.writeText(article.keyword); toast.success('복사됨') }}
-                        className="text-slate-500 hover:text-slate-300 p-1 transition-colors"
-                        title="복사"
-                      >
-                        <Copy className="w-4 h-4" />
-                      </button>
-                      <button
-                        onClick={() => {
-                          setArticles(prev => prev.filter(a => a.id !== article.id))
-                          toast.success('삭제됨')
-                        }}
-                        className="text-slate-500 hover:text-red-400 p-1 transition-colors"
-                        title="삭제"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                      {article.status === 'draft' && (
+        {loading ? (
+          <div className="flex items-center justify-center py-16">
+            <Loader2 className="w-8 h-8 animate-spin text-indigo-400" />
+          </div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-xs text-slate-500 border-b" style={{ borderColor: '#2d2d4a' }}>
+                <th className="pb-3 pr-3 text-left w-8">
+                  <input type="checkbox"
+                    checked={selected.size === articles.length && articles.length > 0}
+                    onChange={selectAll}
+                    className="accent-indigo-500 w-4 h-4 cursor-pointer" />
+                </th>
+                <th className="pb-3 text-left">날짜</th>
+                <th className="pb-3 text-left">키워드</th>
+                <th className="pb-3 text-left hidden md:table-cell">플랫폼</th>
+                <th className="pb-3 text-left hidden sm:table-cell">글자수</th>
+                <th className="pb-3 text-left">AEO</th>
+                <th className="pb-3 text-left">상태</th>
+                <th className="pb-3 text-left">액션</th>
+              </tr>
+            </thead>
+            <tbody>
+              {articles.map(article => (
+                <React.Fragment key={article.id}>
+                  <tr
+                    className={`border-b transition-colors cursor-pointer
+                      ${expandedId === article.id ? 'bg-white/5' : 'hover:bg-white/3'}
+                      ${selected.has(article.id) ? 'bg-indigo-500/5' : ''}`}
+                    style={{ borderColor: '#2d2d4a' }}
+                  >
+                    <td className="py-3 pr-3" onClick={e => { e.stopPropagation(); toggleSelect(article.id) }}>
+                      <input type="checkbox" checked={selected.has(article.id)}
+                        onChange={() => toggleSelect(article.id)}
+                        className="accent-indigo-500 w-4 h-4 cursor-pointer" />
+                    </td>
+                    <td className="py-3 text-slate-500 text-xs whitespace-nowrap">
+                      {new Date(article.created_at).toLocaleDateString('ko-KR', { month: '2-digit', day: '2-digit' })}
+                    </td>
+                    <td className="py-3" onClick={() => setExpandedId(expandedId === article.id ? null : article.id)}>
+                      <div className="font-medium text-slate-300 max-w-[200px] truncate">{article.keyword}</div>
+                    </td>
+                    <td className="py-3 hidden md:table-cell">
+                      <span className="text-xs text-slate-500">{article.platform}</span>
+                    </td>
+                    <td className="py-3 text-slate-500 text-xs hidden sm:table-cell">
+                      {article.word_count.toLocaleString()}자
+                    </td>
+                    <td className="py-3">
+                      <span className={getAEOScoreBadgeClass(article.aeo_score)}>
+                        {article.aeo_score}점
+                      </span>
+                    </td>
+                    <td className="py-3">
+                      <span className={STATUS_BADGE_CLASSES[article.status] || 'badge-gray'}>
+                        {STATUS_LABELS[article.status]}
+                      </span>
+                    </td>
+                    <td className="py-3">
+                      <div className="flex items-center gap-1">
                         <button
-                          onClick={() => {
-                            setArticles(prev => prev.map(a => a.id === article.id ? { ...a, status: 'published' as const } : a))
-                            toast.success('발행됨')
-                          }}
-                          className="text-slate-500 hover:text-emerald-400 p-1 transition-colors"
-                          title="발행"
+                          onClick={() => setExpandedId(expandedId === article.id ? null : article.id)}
+                          className="text-slate-500 hover:text-slate-300 p-1 transition-colors"
+                          title="미리보기"
                         >
-                          <Send className="w-4 h-4" />
+                          {expandedId === article.id
+                            ? <ChevronUp className="w-4 h-4" />
+                            : <Eye className="w-4 h-4" />
+                          }
                         </button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-
-                {/* Expanded Row */}
-                {expandedId === article.id && (
-                  <tr style={{ borderBottom: '1px solid #2d2d4a' }}>
-                    <td colSpan={8} className="py-4 px-3">
-                      <div className="space-y-3">
-                        {/* Meta info */}
-                        <div className="flex items-center gap-4 flex-wrap text-xs text-slate-500">
-                          <span className="flex items-center gap-1">
-                            <Calendar className="w-3 h-3" />
-                            생성: {new Date(article.created_at).toLocaleString('ko-KR')}
-                          </span>
-                          {article.published_at && (
-                            <span className="flex items-center gap-1">
-                              <Send className="w-3 h-3" />
-                              발행: {new Date(article.published_at).toLocaleString('ko-KR')}
-                            </span>
-                          )}
-                          <span className="flex items-center gap-1">
-                            <BarChart2 className="w-3 h-3" />
-                            가독성: {article.readability_score ? Math.round(article.readability_score) : '-'}점
-                          </span>
-                        </div>
-
-                        {/* Content preview */}
-                        <div className="bg-black/20 rounded-lg p-4 text-xs text-slate-400 font-mono leading-relaxed max-h-32 overflow-y-auto">
-                          {article.keyword}에 관한 글이 여기에 표시됩니다. (콘텐츠 미리보기)
-                          <br /><br />
-                          플랫폼: {article.platform} | 글자수: {article.word_count.toLocaleString()}자 | AEO: {article.aeo_score}점
-                        </div>
-
-                        {/* Action buttons */}
-                        <div className="flex items-center gap-2">
-                          <button className="btn-secondary flex items-center gap-1.5 text-xs py-1.5 px-3">
-                            <Edit3 className="w-3.5 h-3.5" /> 재편집
-                          </button>
+                        <button
+                          onClick={() => { navigator.clipboard.writeText(article.keyword); toast.success('복사됨') }}
+                          className="text-slate-500 hover:text-slate-300 p-1 transition-colors"
+                          title="복사"
+                        >
+                          <Copy className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={() => deleteArticle(article.id)}
+                          disabled={deleting === article.id}
+                          className="text-slate-500 hover:text-red-400 p-1 transition-colors"
+                          title="삭제"
+                        >
+                          {deleting === article.id
+                            ? <Loader2 className="w-4 h-4 animate-spin" />
+                            : <Trash2 className="w-4 h-4" />
+                          }
+                        </button>
+                        {article.status === 'draft' && (
                           <button
-                            onClick={() => { navigator.clipboard.writeText(article.keyword); toast.success('복사됨') }}
-                            className="btn-secondary flex items-center gap-1.5 text-xs py-1.5 px-3"
+                            onClick={() => changeStatus(article.id, 'published')}
+                            className="text-slate-500 hover:text-emerald-400 p-1 transition-colors"
+                            title="발행"
                           >
-                            <Copy className="w-3.5 h-3.5" /> 복사
+                            <Send className="w-4 h-4" />
                           </button>
-                          {article.status !== 'published' && (
-                            <button
-                              onClick={() => {
-                                setArticles(prev => prev.map(a => a.id === article.id ? { ...a, status: 'published' as const } : a))
-                                toast.success('발행됨')
-                              }}
-                              className="btn-primary flex items-center gap-1.5 text-xs py-1.5 px-3"
-                            >
-                              <Send className="w-3.5 h-3.5" /> 발행
-                            </button>
-                          )}
-                          <button
-                            onClick={() => {
-                              setArticles(prev => prev.filter(a => a.id !== article.id))
-                              setExpandedId(null)
-                              toast.success('삭제됨')
-                            }}
-                            className="flex items-center gap-1.5 text-xs py-1.5 px-3 rounded-lg font-medium transition-all ml-auto"
-                            style={{ background: 'rgba(239,68,68,0.15)', color: '#f87171', border: '1px solid rgba(239,68,68,0.3)' }}
-                          >
-                            <Trash2 className="w-3.5 h-3.5" /> 삭제
-                          </button>
-                        </div>
+                        )}
                       </div>
                     </td>
                   </tr>
-                )}
-              </React.Fragment>
-            ))}
-          </tbody>
-        </table>
 
-        {paginated.length === 0 && (
+                  {/* Expanded Row */}
+                  {expandedId === article.id && (
+                    <tr style={{ borderBottom: '1px solid #2d2d4a' }}>
+                      <td colSpan={8} className="py-4 px-3">
+                        <div className="space-y-3">
+                          {/* Meta info */}
+                          <div className="flex items-center gap-4 flex-wrap text-xs text-slate-500">
+                            <span className="flex items-center gap-1">
+                              <Calendar className="w-3 h-3" />
+                              생성: {new Date(article.created_at).toLocaleString('ko-KR')}
+                            </span>
+                            {article.published_at && (
+                              <span className="flex items-center gap-1">
+                                <Send className="w-3 h-3" />
+                                발행: {new Date(article.published_at).toLocaleString('ko-KR')}
+                              </span>
+                            )}
+                            <span className="flex items-center gap-1">
+                              <BarChart2 className="w-3 h-3" />
+                              가독성: {article.readability_score ? Math.round(article.readability_score) : '-'}점
+                            </span>
+                          </div>
+
+                          {/* Content preview */}
+                          <div className="bg-black/20 rounded-lg p-4 text-xs text-slate-400 font-mono leading-relaxed max-h-40 overflow-y-auto whitespace-pre-wrap">
+                            {article.content
+                              ? article.content.substring(0, 500) + (article.content.length > 500 ? '\n\n... (전체 내용은 길어서 일부만 표시)' : '')
+                              : `${article.keyword}에 관한 글 | 플랫폼: ${article.platform} | 글자수: ${article.word_count.toLocaleString()}자 | AEO: ${article.aeo_score}점`
+                            }
+                          </div>
+
+                          {/* Action buttons */}
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => navigator.clipboard.writeText(article.content || article.keyword).then(() => toast.success('복사됨'))}
+                              className="btn-secondary flex items-center gap-1.5 text-xs py-1.5 px-3"
+                            >
+                              <Copy className="w-3.5 h-3.5" /> 복사
+                            </button>
+                            {article.status !== 'published' && (
+                              <button
+                                onClick={() => changeStatus(article.id, 'published')}
+                                className="btn-primary flex items-center gap-1.5 text-xs py-1.5 px-3"
+                              >
+                                <Send className="w-3.5 h-3.5" /> 발행
+                              </button>
+                            )}
+                            {article.status === 'published' && (
+                              <button
+                                onClick={() => changeStatus(article.id, 'draft')}
+                                className="btn-secondary flex items-center gap-1.5 text-xs py-1.5 px-3"
+                              >
+                                <Edit3 className="w-3.5 h-3.5" /> 초안으로
+                              </button>
+                            )}
+                            <button
+                              onClick={() => { deleteArticle(article.id); setExpandedId(null) }}
+                              className="flex items-center gap-1.5 text-xs py-1.5 px-3 rounded-lg font-medium transition-all ml-auto"
+                              style={{ background: 'rgba(239,68,68,0.15)', color: '#f87171', border: '1px solid rgba(239,68,68,0.3)' }}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" /> 삭제
+                            </button>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        {!loading && articles.length === 0 && (
           <div className="text-center py-16 text-slate-600">
             <FileText className="w-12 h-12 mx-auto mb-3 opacity-30" />
-            <p>결과가 없습니다.</p>
+            <p className="mb-1">결과가 없습니다.</p>
+            <p className="text-xs">글 생성 페이지에서 첫 번째 글을 만들어보세요.</p>
           </div>
         )}
       </div>
@@ -417,11 +472,11 @@ export default function HistoryPage() {
       {totalPages > 1 && (
         <div className="flex items-center justify-between">
           <span className="text-xs text-slate-500">
-            {(page - 1) * PER_PAGE + 1} - {Math.min(page * PER_PAGE, filtered.length)} / {filtered.length}개
+            총 {total}개
           </span>
           <div className="flex items-center gap-1">
             <button
-              onClick={() => setPage(p => Math.max(1, p - 1))}
+              onClick={() => fetchArticles(Math.max(1, page - 1))}
               disabled={page === 1}
               className="btn-secondary p-2 disabled:opacity-40"
             >
@@ -433,7 +488,7 @@ export default function HistoryPage() {
               return (
                 <button
                   key={pg}
-                  onClick={() => setPage(pg)}
+                  onClick={() => fetchArticles(pg)}
                   className={`w-8 h-8 rounded-lg text-sm font-medium transition-all
                     ${pg === page ? 'bg-indigo-600 text-white' : 'btn-secondary'}`}
                 >
@@ -442,7 +497,7 @@ export default function HistoryPage() {
               )
             })}
             <button
-              onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+              onClick={() => fetchArticles(Math.min(totalPages, page + 1))}
               disabled={page === totalPages}
               className="btn-secondary p-2 disabled:opacity-40"
             >

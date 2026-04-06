@@ -16,7 +16,7 @@
     {
       "binding": "DB",
       "database_name": "nside-pro-production",
-      "database_id": "00000000-0000-0000-0000-000000000000"
+      "database_id": "7c91b029-7118-4a4d-b2ba-718130602ea5"
     }
   ],
 
@@ -25,8 +25,8 @@
   "kv_namespaces": [
     {
       "binding": "CACHE",
-      "id": "00000000000000000000000000000000",
-      "preview_id": "00000000000000000000000000000000"
+      "id": "eab8dd026eea4c2381a4a626bb0c18f7",
+      "preview_id": "eab8dd026eea4c2381a4a626bb0c18f7"
     }
   ]
 }

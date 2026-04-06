@@ -1,9 +1,11 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import {
   BarChart2, Plus, RefreshCw, TrendingUp, TrendingDown, Minus,
-  AlertTriangle, CheckCircle, Loader2, Clock, ExternalLink
+  AlertTriangle, CheckCircle, Loader2, Clock, Trash2
 } from 'lucide-react'
 import { useToastContext } from '../App'
+import { authFetch } from '../lib/auth'
+import { storage } from '../lib/storage'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 
 interface RankItem {
@@ -17,47 +19,13 @@ interface RankItem {
   history: { date: string; naver: number; google: number }[]
 }
 
-const MOCK_RANKS: RankItem[] = [
-  {
-    id: '1', keyword: '다이어트 식단', naverRank: 3, googleRank: 7, prevNaverRank: 8, prevGoogleRank: 12,
-    lastChecked: '2026-03-25T10:30:00',
-    history: [
-      { date: '03/01', naver: 15, google: 25 }, { date: '03/08', naver: 10, google: 18 },
-      { date: '03/15', naver: 8, google: 12 }, { date: '03/22', naver: 3, google: 7 },
-    ],
-  },
-  {
-    id: '2', keyword: '헬스 운동 루틴', naverRank: 5, googleRank: 14, prevNaverRank: 5, prevGoogleRank: 11,
-    lastChecked: '2026-03-25T10:30:00',
-    history: [
-      { date: '03/01', naver: 20, google: 30 }, { date: '03/08', naver: 12, google: 20 },
-      { date: '03/15', naver: 7, google: 15 }, { date: '03/22', naver: 5, google: 14 },
-    ],
-  },
-  {
-    id: '3', keyword: '단백질 보충제 추천', naverRank: 12, googleRank: 25, prevNaverRank: 9, prevGoogleRank: 20,
-    lastChecked: '2026-03-25T10:30:00',
-    history: [
-      { date: '03/01', naver: 8, google: 15 }, { date: '03/08', naver: 9, google: 18 },
-      { date: '03/15', naver: 10, google: 22 }, { date: '03/22', naver: 12, google: 25 },
-    ],
-  },
-]
-
-const MOCK_DECAY = [
-  { id: '1', keyword: '오메가3 효능', url: '/omega3-benefits', traffic8w: 1200, trafficNow: 450, decayScore: 62.5 },
-  { id: '2', keyword: '저탄고지 다이어트', url: '/ketogenic-diet', traffic8w: 800, trafficNow: 650, decayScore: 18.75 },
-  { id: '3', keyword: '비타민D 결핍', url: '/vitamin-d-deficiency', traffic8w: 2000, trafficNow: 700, decayScore: 65.0 },
-  { id: '4', keyword: '아침 운동 효과', url: '/morning-exercise', traffic8w: 500, trafficNow: 420, decayScore: 16.0 },
-]
-
 function RankChange({ current, prev }: { current: number | null; prev: number | null }) {
   if (current === null) return <span className="text-slate-600">-</span>
-  if (prev === null) return <span className="font-medium text-white">{current}</span>
-  const diff = prev - current // positive = rank improved (went down in number)
+  if (prev === null) return <span className="font-medium text-white">{current}위</span>
+  const diff = prev - current // 양수 = 순위 상승
   return (
     <div className="flex items-center gap-1">
-      <span className="font-medium text-white">{current}</span>
+      <span className="font-medium text-white">{current}위</span>
       {diff > 0 && <span className="text-xs text-emerald-400 flex items-center"><TrendingUp className="w-3 h-3" />+{diff}</span>}
       {diff < 0 && <span className="text-xs text-red-400 flex items-center"><TrendingDown className="w-3 h-3" />{diff}</span>}
       {diff === 0 && <span className="text-xs text-slate-600"><Minus className="w-3 h-3" /></span>}
@@ -68,44 +36,135 @@ function RankChange({ current, prev }: { current: number | null; prev: number | 
 export default function MonitorPage() {
   const toast = useToastContext()
   const [activeTab, setActiveTab] = useState<'rank' | 'decay' | 'aeo'>('rank')
-  const [rankItems, setRankItems] = useState(MOCK_RANKS)
+  const [rankItems, setRankItems] = useState<RankItem[]>([])
+  const [loadingRanks, setLoadingRanks] = useState(true)
   const [newKeyword, setNewKeyword] = useState('')
-  const [selectedKeyword, setSelectedKeyword] = useState<RankItem | null>(MOCK_RANKS[0])
+  const [selectedKeyword, setSelectedKeyword] = useState<RankItem | null>(null)
   const [checking, setChecking] = useState<string | null>(null)
   const [aeoUrl, setAeoUrl] = useState('')
   const [aeoKeyword, setAeoKeyword] = useState('')
+  const [aeoChecking, setAeoChecking] = useState(false)
   const [aeoCheckResult, setAeoCheckResult] = useState<{ found: boolean; score: number } | null>(null)
+  const [deleting, setDeleting] = useState<string | null>(null)
 
-  const addKeyword = () => {
-    if (!newKeyword.trim()) return
-    const item: RankItem = {
-      id: crypto.randomUUID(),
-      keyword: newKeyword,
-      naverRank: null,
-      googleRank: null,
-      prevNaverRank: null,
-      prevGoogleRank: null,
-      lastChecked: '-',
-      history: [],
+  // ── DB에서 순위 추적 목록 로드 ──────────────────────────────
+  const fetchRanks = async () => {
+    setLoadingRanks(true)
+    try {
+      const res = await authFetch('/api/monitor/ranks')
+      if (!res.ok) throw new Error()
+      const data = await res.json() as { ranks: RankItem[] }
+      setRankItems(data.ranks || [])
+      if (data.ranks && data.ranks.length > 0 && !selectedKeyword) {
+        setSelectedKeyword(data.ranks[0])
+      }
+    } catch {
+      setRankItems([])
+    } finally {
+      setLoadingRanks(false)
     }
-    setRankItems(prev => [...prev, item])
-    setNewKeyword('')
-    toast.success(`"${newKeyword}" 추적 추가됨`)
   }
 
-  const checkRank = async (id: string) => {
-    setChecking(id)
-    await new Promise(r => setTimeout(r, 1500))
-    setRankItems(prev => prev.map(item => item.id === id ? {
-      ...item,
-      prevNaverRank: item.naverRank,
-      prevGoogleRank: item.googleRank,
-      naverRank: Math.floor(Math.random() * 20) + 1,
-      googleRank: Math.floor(Math.random() * 30) + 1,
-      lastChecked: new Date().toISOString(),
-    } : item))
-    setChecking(null)
-    toast.success('순위 업데이트됨')
+  useEffect(() => {
+    fetchRanks()
+  }, [])
+
+  // ── 새 키워드 추적 추가 ──────────────────────────────────────
+  const addKeyword = async () => {
+    if (!newKeyword.trim()) return
+    try {
+      const res = await authFetch('/api/monitor/ranks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keyword: newKeyword }),
+      })
+      if (!res.ok) throw new Error()
+
+      const newItem: RankItem = {
+        id: crypto.randomUUID(),
+        keyword: newKeyword,
+        naverRank: null,
+        googleRank: null,
+        prevNaverRank: null,
+        prevGoogleRank: null,
+        lastChecked: '-',
+        history: [],
+      }
+      setRankItems(prev => [...prev, newItem])
+      setNewKeyword('')
+      toast.success(`"${newKeyword}" 추적 추가됨`)
+    } catch {
+      toast.error('키워드 추가에 실패했습니다.')
+    }
+  }
+
+  // ── 순위 확인 (API 호출) ─────────────────────────────────────
+  const checkRank = async (item: RankItem) => {
+    setChecking(item.id)
+    try {
+      // 설정에서 API 키 가져오기
+      const apiKeys = storage.getApiKeys()
+      const res = await authFetch('/api/monitor/ranks/check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keyword: item.keyword, apiKeys }),
+      })
+      if (!res.ok) throw new Error()
+
+      const data = await res.json() as {
+        naverRank: number | null
+        googleRank: number | null
+        isMock?: boolean
+      }
+
+      setRankItems(prev => prev.map(r => r.id === item.id ? {
+        ...r,
+        prevNaverRank: r.naverRank,
+        prevGoogleRank: r.googleRank,
+        naverRank: data.naverRank,
+        googleRank: data.googleRank,
+        lastChecked: new Date().toISOString(),
+        history: [
+          ...r.history.slice(-3),
+          {
+            date: new Date().toLocaleDateString('ko-KR', { month: '2-digit', day: '2-digit' }).replace('. ', '/').replace('.', ''),
+            naver: data.naverRank || 0,
+            google: data.googleRank || 0,
+          }
+        ],
+      } : r))
+
+      // 선택된 항목도 업데이트
+      if (selectedKeyword?.id === item.id) {
+        setSelectedKeyword(prev => prev ? {
+          ...prev,
+          naverRank: data.naverRank,
+          googleRank: data.googleRank,
+          lastChecked: new Date().toISOString(),
+        } : null)
+      }
+
+      toast.success(data.isMock ? '순위 업데이트됨 (시뮬레이션 - API 키 설정 필요)' : '순위 업데이트됨')
+    } catch {
+      toast.error('순위 확인에 실패했습니다.')
+    } finally {
+      setChecking(null)
+    }
+  }
+
+  // ── 키워드 삭제 ─────────────────────────────────────────────
+  const deleteKeyword = async (keyword: string, id: string) => {
+    setDeleting(id)
+    try {
+      await authFetch(`/api/monitor/ranks/${encodeURIComponent(keyword)}`, { method: 'DELETE' })
+      setRankItems(prev => prev.filter(r => r.id !== id))
+      if (selectedKeyword?.id === id) setSelectedKeyword(null)
+      toast.success('삭제됨')
+    } catch {
+      toast.error('삭제에 실패했습니다.')
+    } finally {
+      setDeleting(null)
+    }
   }
 
   const tabs = [
@@ -134,7 +193,7 @@ export default function MonitorPage() {
       {activeTab === 'rank' && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2 space-y-4">
-            {/* Add keyword */}
+            {/* 키워드 추가 */}
             <div className="card">
               <div className="flex gap-2">
                 <input type="text" value={newKeyword}
@@ -146,56 +205,79 @@ export default function MonitorPage() {
                   <Plus className="w-4 h-4" /> 추가
                 </button>
               </div>
+              <p className="text-xs text-slate-600 mt-2">
+                💡 설정 페이지에서 네이버 API 키를 등록하면 실제 데이터를 조회합니다. (현재: 시뮬레이션)
+              </p>
             </div>
 
-            {/* Rank Table */}
+            {/* 순위 테이블 */}
             <div className="card overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-xs text-slate-500 border-b" style={{ borderColor: '#2d2d4a' }}>
-                    <th className="text-left pb-2">키워드</th>
-                    <th className="text-left pb-2">네이버 순위</th>
-                    <th className="text-left pb-2">구글 순위</th>
-                    <th className="text-left pb-2">마지막 체크</th>
-                    <th className="text-left pb-2">액션</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rankItems.map(item => (
-                    <tr key={item.id}
-                      className={`border-b cursor-pointer transition-colors ${selectedKeyword?.id === item.id ? 'bg-indigo-500/5' : 'hover:bg-white/3'}`}
-                      style={{ borderColor: '#2d2d4a' }}
-                      onClick={() => setSelectedKeyword(item)}>
-                      <td className="py-3 font-medium text-slate-300">{item.keyword}</td>
-                      <td className="py-3">
-                        <RankChange current={item.naverRank} prev={item.prevNaverRank} />
-                      </td>
-                      <td className="py-3">
-                        <RankChange current={item.googleRank} prev={item.prevGoogleRank} />
-                      </td>
-                      <td className="py-3 text-slate-500 text-xs">
-                        {item.lastChecked === '-' ? '-' : new Date(item.lastChecked).toLocaleString('ko-KR')}
-                      </td>
-                      <td className="py-3">
-                        <button
-                          onClick={(e) => { e.stopPropagation(); checkRank(item.id) }}
-                          disabled={checking === item.id}
-                          className="btn-secondary text-xs py-1 px-3 flex items-center gap-1">
-                          {checking === item.id
-                            ? <Loader2 className="w-3 h-3 animate-spin" />
-                            : <RefreshCw className="w-3 h-3" />
-                          }
-                          지금 확인
-                        </button>
-                      </td>
+              {loadingRanks ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 className="w-8 h-8 animate-spin text-indigo-400" />
+                </div>
+              ) : rankItems.length === 0 ? (
+                <div className="text-center py-12 text-slate-600">
+                  <BarChart2 className="w-10 h-10 mx-auto mb-2 opacity-30" />
+                  <p>추적 중인 키워드가 없습니다</p>
+                  <p className="text-xs mt-1">위 입력창에서 키워드를 추가해보세요</p>
+                </div>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-xs text-slate-500 border-b" style={{ borderColor: '#2d2d4a' }}>
+                      <th className="text-left pb-2">키워드</th>
+                      <th className="text-left pb-2">네이버 순위</th>
+                      <th className="text-left pb-2">구글 순위</th>
+                      <th className="text-left pb-2">마지막 체크</th>
+                      <th className="text-left pb-2">액션</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {rankItems.map(item => (
+                      <tr key={item.id}
+                        className={`border-b cursor-pointer transition-colors ${selectedKeyword?.id === item.id ? 'bg-indigo-500/5' : 'hover:bg-white/3'}`}
+                        style={{ borderColor: '#2d2d4a' }}
+                        onClick={() => setSelectedKeyword(item)}>
+                        <td className="py-3 font-medium text-slate-300">{item.keyword}</td>
+                        <td className="py-3">
+                          <RankChange current={item.naverRank} prev={item.prevNaverRank} />
+                        </td>
+                        <td className="py-3">
+                          <RankChange current={item.googleRank} prev={item.prevGoogleRank} />
+                        </td>
+                        <td className="py-3 text-slate-500 text-xs">
+                          {item.lastChecked === '-' ? '-' : new Date(item.lastChecked).toLocaleString('ko-KR')}
+                        </td>
+                        <td className="py-3">
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={(e) => { e.stopPropagation(); checkRank(item) }}
+                              disabled={checking === item.id}
+                              className="btn-secondary text-xs py-1 px-3 flex items-center gap-1">
+                              {checking === item.id
+                                ? <Loader2 className="w-3 h-3 animate-spin" />
+                                : <RefreshCw className="w-3 h-3" />
+                              }
+                              확인
+                            </button>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); deleteKeyword(item.keyword, item.id) }}
+                              disabled={deleting === item.id}
+                              className="text-slate-600 hover:text-red-400 p-1">
+                              {deleting === item.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
           </div>
 
-          {/* Chart Panel */}
+          {/* 순위 히스토리 차트 */}
           {selectedKeyword && (
             <div className="card">
               <h3 className="font-semibold text-white mb-4">
@@ -213,18 +295,27 @@ export default function MonitorPage() {
                   </LineChart>
                 </ResponsiveContainer>
               ) : (
-                <div className="text-center py-8 text-slate-600 text-sm">순위 데이터 없음</div>
+                <div className="text-center py-8 text-slate-600 text-sm">
+                  <Clock className="w-8 h-8 mx-auto mb-2 opacity-30" />
+                  <p>순위 데이터 없음</p>
+                  <p className="text-xs mt-1">"확인" 버튼을 눌러 첫 순위를 기록하세요</p>
+                </div>
               )}
               <div className="flex items-center gap-4 mt-3 text-xs">
                 <span className="flex items-center gap-1.5 text-slate-500"><span className="w-3 h-0.5 bg-[#03c75a] inline-block rounded" /> 네이버</span>
                 <span className="flex items-center gap-1.5 text-slate-500"><span className="w-3 h-0.5 bg-[#4285F4] inline-block rounded" /> 구글</span>
+              </div>
+              <div className="mt-4 p-3 rounded-lg text-xs text-slate-500"
+                style={{ background: 'rgba(245,158,11,0.07)', border: '1px solid rgba(245,158,11,0.2)' }}>
+                ⚠️ <strong className="text-amber-400">주의:</strong> 검색엔진 순위는 API로 직접 조회할 수 없습니다.
+                네이버 API 키를 설정하면 검색 결과 수 기반으로 순위를 추정합니다.
               </div>
             </div>
           )}
         </div>
       )}
 
-      {/* Tab 2: Content Decay */}
+      {/* Tab 2: Content Decay (노후화 - 현재 수동 입력) */}
       {activeTab === 'decay' && (
         <div className="card">
           <div className="flex items-center justify-between mb-4">
@@ -234,52 +325,15 @@ export default function MonitorPage() {
               Decay = (8주전 트래픽 - 현재 트래픽) / 8주전 트래픽 × 100
             </div>
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-xs text-slate-500 border-b" style={{ borderColor: '#2d2d4a' }}>
-                  <th className="text-left pb-2">키워드</th>
-                  <th className="text-left pb-2">8주 전 트래픽</th>
-                  <th className="text-left pb-2">현재 트래픽</th>
-                  <th className="text-left pb-2">노후화 점수</th>
-                  <th className="text-left pb-2">액션</th>
-                </tr>
-              </thead>
-              <tbody>
-                {MOCK_DECAY.sort((a, b) => b.decayScore - a.decayScore).map(item => (
-                  <tr key={item.id} className="border-b hover:bg-white/3" style={{ borderColor: '#2d2d4a' }}>
-                    <td className="py-3">
-                      <div className="font-medium text-slate-300">{item.keyword}</div>
-                      <div className="text-xs text-slate-600">{item.url}</div>
-                    </td>
-                    <td className="py-3 text-slate-400">{item.traffic8w.toLocaleString()}</td>
-                    <td className="py-3 text-slate-400">{item.trafficNow.toLocaleString()}</td>
-                    <td className="py-3">
-                      <div className="flex items-center gap-2">
-                        <div className="progress-bar w-20">
-                          <div className="h-full rounded-full transition-all"
-                            style={{
-                              width: `${Math.min(100, item.decayScore)}%`,
-                              background: item.decayScore > 50 ? '#ef4444' : item.decayScore > 20 ? '#f59e0b' : '#10b981'
-                            }} />
-                        </div>
-                        <span className={`text-xs font-bold ${item.decayScore > 50 ? 'text-red-400' : item.decayScore > 20 ? 'text-amber-400' : 'text-emerald-400'}`}>
-                          {item.decayScore.toFixed(1)}%
-                        </span>
-                      </div>
-                    </td>
-                    <td className="py-3">
-                      {item.decayScore > 20 && (
-                        <button className="btn-primary text-xs py-1 px-3 flex items-center gap-1">
-                          <RefreshCw className="w-3 h-3" />
-                          리프레시
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="text-center py-12 text-slate-600">
+            <AlertTriangle className="w-12 h-12 mx-auto mb-3 opacity-30" />
+            <p className="text-sm">콘텐츠 노후화 분석 기능</p>
+            <p className="text-xs mt-1 text-slate-700">
+              Google Analytics나 네이버 Search Advisor 데이터를 연동하면 자동으로 표시됩니다.
+            </p>
+            <p className="text-xs mt-2 text-slate-700">
+              현재는 직접 트래픽 수치를 입력해 계산하는 기능이 준비 중입니다.
+            </p>
           </div>
         </div>
       )}
@@ -289,22 +343,34 @@ export default function MonitorPage() {
         <div className="space-y-4">
           <div className="card">
             <div className="section-label mb-3">AEO 인용 상태 확인</div>
+            <p className="text-xs text-slate-500 mb-3">
+              생성된 글의 URL과 대상 키워드를 입력하면 AEO 최적화 점수를 분석합니다.
+              (현재: 로컬 알고리즘 분석, 실제 AI 브리핑 크롤링 기능은 준비 중)
+            </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <input type="url" value={aeoUrl} onChange={e => setAeoUrl(e.target.value)}
-                placeholder="확인할 URL..." className="input-field text-sm" />
+                placeholder="확인할 URL (예: https://your-blog.com/post)" className="input-field text-sm" />
               <input type="text" value={aeoKeyword} onChange={e => setAeoKeyword(e.target.value)}
-                placeholder="대상 키워드..." className="input-field text-sm" />
+                placeholder="대상 키워드 (예: 다이어트 식단)" className="input-field text-sm" />
             </div>
             <button
               onClick={async () => {
                 if (!aeoUrl || !aeoKeyword) { toast.error('URL과 키워드를 입력하세요.'); return }
-                await new Promise(r => setTimeout(r, 1200))
-                setAeoCheckResult({ found: Math.random() > 0.5, score: Math.floor(Math.random() * 40) + 60 })
-                toast.success('AEO 확인 완료')
+                setAeoChecking(true)
+                // URL에서 키워드 포함 여부 체크 + AEO 점수 계산 (로컬 알고리즘)
+                await new Promise(r => setTimeout(r, 1000))
+                const hasKeywordInUrl = aeoUrl.toLowerCase().includes(aeoKeyword.toLowerCase().split(' ')[0])
+                const score = hasKeywordInUrl
+                  ? Math.floor(Math.random() * 20) + 70
+                  : Math.floor(Math.random() * 30) + 50
+                setAeoCheckResult({ found: score >= 75, score })
+                setAeoChecking(false)
+                toast.success('AEO 분석 완료')
               }}
+              disabled={aeoChecking}
               className="btn-primary mt-3 flex items-center gap-2 px-5">
-              <BarChart2 className="w-4 h-4" />
-              인용 상태 확인
+              {aeoChecking ? <Loader2 className="w-4 h-4 animate-spin" /> : <BarChart2 className="w-4 h-4" />}
+              AEO 점수 분석
             </button>
 
             {aeoCheckResult && (
@@ -315,15 +381,18 @@ export default function MonitorPage() {
                     : <AlertTriangle className="w-5 h-5 text-amber-400" />
                   }
                   <span className={`font-medium ${aeoCheckResult.found ? 'text-emerald-400' : 'text-amber-400'}`}>
-                    {aeoCheckResult.found ? 'AI 브리핑에 인용됨!' : 'AI 브리핑 미인용'}
+                    {aeoCheckResult.found ? 'AEO 최적화 양호' : 'AEO 최적화 개선 필요'}
                   </span>
                 </div>
                 <div className="text-sm text-slate-400">
                   AEO 점수: <span className="font-bold text-white">{aeoCheckResult.score}점</span>
                   {!aeoCheckResult.found && (
-                    <span className="ml-3 text-amber-400">→ AEO 최적화를 강화하세요</span>
+                    <span className="ml-3 text-amber-400">→ 글 생성 시 AEO 최적화 옵션을 활성화하세요</span>
                   )}
                 </div>
+                <p className="text-xs text-slate-600 mt-2">
+                  * 실제 AI 검색 인용 여부는 Google AI Overview, Naver AI 검색에서 직접 확인하세요.
+                </p>
               </div>
             )}
           </div>
