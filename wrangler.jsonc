@@ -5,13 +5,10 @@
   "compatibility_flags": ["nodejs_compat"],
   "pages_build_output_dir": "./dist",
 
-  // Environment variables
   "vars": {
     "ENVIRONMENT": "production"
   },
 
-  // D1 Database binding
-  // Create with: npx wrangler d1 create nside-pro-production
   "d1_databases": [
     {
       "binding": "DB",
@@ -20,8 +17,6 @@
     }
   ],
 
-  // KV Namespace binding
-  // Create with: npx wrangler kv:namespace create CACHE
   "kv_namespaces": [
     {
       "binding": "CACHE",
